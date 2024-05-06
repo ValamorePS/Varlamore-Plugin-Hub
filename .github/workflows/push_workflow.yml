@@ -25,7 +25,7 @@ jobs:
 
       - name: Build with Gradle
         env:
-          SECRET_ARG: ${{ secrets.GITHUB_TOKEN }}
+          SECRET_ARG: ${{ secrets.TOKEN }}
         run: |
           echo "🛠️ Building with Gradle..."
           ./gradlew downloadPlugins --args="$SECRET_ARG"

@@ -19,10 +19,6 @@ dependencies {
 // https://mvnrepository.com/artifact/org.eclipse.jgit/org.eclipse.jgit
     implementation("org.eclipse.jgit:org.eclipse.jgit:6.9.0.202403050737-r")
 
-
-
-
-
 }
 
 tasks.create<JavaExec>("downloadPlugins") {
