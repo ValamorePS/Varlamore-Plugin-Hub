@@ -18,6 +18,13 @@ dependencies {
     implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.17.0")
 // https://mvnrepository.com/artifact/org.eclipse.jgit/org.eclipse.jgit
     implementation("org.eclipse.jgit:org.eclipse.jgit:6.9.0.202403050737-r")
+    // https://mvnrepository.com/artifact/org.projectlombok/lombok
+    compileOnly("org.projectlombok:lombok:1.18.32")
+// https://mvnrepository.com/artifact/jakarta.annotation/jakarta.annotation-api
+    implementation("jakarta.annotation:jakarta.annotation-api:3.0.0")
+// https://mvnrepository.com/artifact/com.google.code.gson/gson
+    implementation("com.google.code.gson:gson:2.10.1")
+
 
 }
 

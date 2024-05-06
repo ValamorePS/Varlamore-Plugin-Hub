@@ -1,15 +1,18 @@
+import PluginHubManifest.ManifestFull
+import PluginHubManifest.ManifestLite
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.PropertyNamingStrategies
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.google.gson.Gson
 import com.mashape.unirest.http.HttpResponse
 import com.mashape.unirest.http.JsonNode
 import com.mashape.unirest.http.Unirest
+import jakarta.annotation.Nullable
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.errors.GitAPIException
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
-
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.*
@@ -28,9 +31,12 @@ import java.security.spec.PKCS8EncodedKeySpec
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.*
-import kotlin.io.path.*
+import kotlin.io.path.createDirectory
+import kotlin.io.path.fileSize
 
 object PluginDownloader {
+
+    val GSON: Gson = Gson()
 
     private val mapper = ObjectMapper(YAMLFactory())
         .registerKotlinModule()
@@ -77,35 +83,76 @@ object PluginDownloader {
         val availablePluginsManifest: JSONArray = latestManifestFull.`object`.optJSONArray("display")
         val availablePlugins: JSONArray = latestManifestLite.`object`.optJSONArray("jars")
 
-        val filteredList = availablePlugins.filterIsInstance<JSONObject>().filter { p -> wantedPlugins.contains(p.getString("internalName")) }
+        val liteManifest = availablePlugins.filterIsInstance<JSONObject>().filter { p -> wantedPlugins.contains(p.getString("internalName")) }
         val filteredMapManifest = availablePluginsManifest.filterIsInstance<JSONObject>()
             .filter { p -> wantedPlugins.contains(p.getString("internalName")) }
             .associateBy({ it.getString("internalName") }, { it })
 
-        filteredList.forEach { p ->
+        liteManifest.forEach { p ->
             val internalName = p.getString("internalName")
             val fullManifest = filteredMapManifest[internalName]?: return
             val hash = p.getString("jarHash")
             val icon = fullManifest.getString("iconHash")
-            println(fullManifest)
-
-            println("plugin: $internalName downloading")
-
             download("jar", internalName, "${internalName}_${hash}.jar")
             download("icon", internalName,  "${internalName}_${icon}.png")
         }
 
+        val manifestFull = ManifestFull()
+        val manifestLite = ManifestLite()
+
+        liteManifest.forEach {
+            val data = PluginHubManifest.JarData();
+            data.internalName = it.getString("internalName")
+            data.displayName = it.getString("displayName")
+            data.jarHash = it.getString("jarHash")
+            val path = Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY, "jar", "${data.internalName}_${data.jarHash}.jar")
+            data.jarSize = path.fileSize().toInt()
+
+            manifestLite.jars.add(data)
+        }
+
+
+        filteredMapManifest.forEach {
+            val data = PluginHubManifest.DisplayData();
+            val internalName = it.key
+            data.internalName = internalName
+            data.tags = (it.value.get("tags") as? JSONArray)?.map { it.toString() }?.toTypedArray()
+            data.iconHash = it.value.getString("iconHash")
+            data.displayName = it.value.getString("displayName")
+            data.version = it.value.getString("displayName")
+            data.createdAt = it.value.getLong("createdAt")
+            data.lastUpdatedAt = it.value.getLong("lastUpdatedAt")
+            data.author = it.value.getString("author")
+            data.description = it.value.getString("description")
+
+            if(it.value.has("warning")) {
+                data.warning = it.value.getString("warning")
+            }
+            if(it.value.has("buildFailAt")) {
+                data.buildFailAt = it.value.getLong("buildFailAt")
+            }
+            if(it.value.has("unavailableReason")) {
+                data.unavailableReason = it.value.getString("unavailableReason")
+            }
+
+
+            manifestFull.display.add(data)
+            manifestFull.jars.add(manifestLite.jars.first { it.internalName == internalName })
+        }
+
+
+
         Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY, "manifest").createDirectory()
-        writeLiteManifest(filteredList)
-        writeFullManifest(filteredMapManifest.values.toMutableList())
+        writeLiteManifest(manifestLite)
+        writeFullManifest(manifestFull)
 
         commitFiles("https://github.com/ValamorePS/hosting.git",args.first(),Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY))
 
 
     }
 
-    private fun writeLiteManifest(filteredList : List<JSONObject>) {
-        val output = filteredList.toString().encodeToByteArray()
+    private fun writeLiteManifest(manifest: ManifestLite) {
+        val output = GSON.toJson(manifest).encodeToByteArray()
 
         val signature1 = Signature.getInstance("SHA256withRSA")
         val privateKey: PrivateKey = get(Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_KEY_PATH, PluginHubConstants.PLUGIN_HUB_PRIVATE_KEY).toString())
@@ -127,8 +174,8 @@ object PluginDownloader {
         Files.write(Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY, "manifest" , "1.0.0_lite.js"), arr)
     }
 
-    private fun writeFullManifest(filteredList : List<JSONObject>) {
-        val output = filteredList.toString().encodeToByteArray()
+    private fun writeFullManifest(filteredList: ManifestFull) {
+        val output = GSON.toJson(filteredList).encodeToByteArray()
 
         val signature1 = Signature.getInstance("SHA256withRSA")
         val privateKey: PrivateKey = get(Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_KEY_PATH, PluginHubConstants.PLUGIN_HUB_PRIVATE_KEY).toString())
