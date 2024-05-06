@@ -1,0 +1,55 @@
+name: Deploy to Hosting Repository
+
+on:
+  push:
+    paths:
+      - 'plugin-hub/wanted-plugins.yml'
+      - 'plugin-hub/plugins/**' # Watch for changes in any file within 'plugin-hub/plugins/' directory
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up JDK
+        uses: actions/setup-java@v2
+        with:
+          distribution: 'adopt'
+          java-version: '11' # adjust Java version if needed
+
+      - name: Build with Gradle
+        run: ./gradlew build # adjust this command based on your Gradle setup
+
+      - name: List changed files
+        id: file_changes
+        run: |
+          git diff --name-only ${{ github.event.before }} ${{ github.sha }} > changed_files.txt
+
+      - name: Extract file names
+        id: extract_filenames
+        run: |
+          echo "Plugins Updated ($(date +'%Y-%m-%d %H:%M:%S'))" > commit_message.txt
+          echo "" >> commit_message.txt
+          echo "Files changed:" >> commit_message.txt
+          cat changed_files.txt | while read filename; do
+            name=$(echo $filename | cut -d'_' -f1)
+            echo $name >> commit_message.txt
+          done
+
+      - name: Push files to hosting repository
+        env:
+          GH_USERNAME: ${{ github.actor }}
+          GH_EMAIL: ${{ github.actor }}@users.noreply.github.com
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.email "${GH_EMAIL}"
+          git config --global user.name "${GH_USERNAME}"
+          git clone https://github.com/ValamorePS/hosting.git tmp-hosting-repo
+          cp -r plugin-hub/plugins/* tmp-hosting-repo/ # Copy files from plugins directory
+          cd tmp-hosting-repo
+          git add .
+          git commit -F ../commit_message.txt
+          git push origin main # adjust branch name if needed
