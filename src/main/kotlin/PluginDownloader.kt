@@ -6,6 +6,9 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.mashape.unirest.http.HttpResponse
 import com.mashape.unirest.http.JsonNode
 import com.mashape.unirest.http.Unirest
+import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.api.errors.GitAPIException
+import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
 
 import org.json.JSONArray
 import org.json.JSONObject
@@ -14,6 +17,7 @@ import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 import java.security.KeyFactory
 import java.security.PrivateKey
 import java.security.Signature
@@ -21,8 +25,10 @@ import java.security.cert.Certificate
 import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.spec.PKCS8EncodedKeySpec
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.*
-import kotlin.io.path.createDirectory
+import kotlin.io.path.*
 
 object PluginDownloader {
 
@@ -92,6 +98,10 @@ object PluginDownloader {
         Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY, "manifest").createDirectory()
         writeLiteManifest(filteredList)
         writeFullManifest(filteredMapManifest.values.toMutableList())
+
+        commitFiles("https://github.com/ValamorePS/hosting.git",args.first(),Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY))
+
+
     }
 
     private fun writeLiteManifest(filteredList : List<JSONObject>) {
@@ -206,8 +216,7 @@ object PluginDownloader {
     private fun loadRuneLiteCertificate(): Certificate? {
         if (!Files.exists(Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_PUBLIC_KEY))) {
             error(
-                "You need to grab RuneLite's externalplugins.crt in order to download plugins from RuneLite's plugin hub!\n" +
-                        "Put it here: ${Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH).toAbsolutePath()}"
+                "You need to grab RuneLite's externalplugins.crt in order to download plugins from RuneLite's plugin hub!\n" + "Put it here: ${Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH).toAbsolutePath()}"
             )
         }
 
@@ -236,4 +245,60 @@ object PluginDownloader {
         val keySpec = PKCS8EncodedKeySpec(encoded)
         return kf.generatePrivate(keySpec)
     }
+
+    private fun commitFiles(repositoryUrl: String, token: String, directoryPath: Path) {
+        try {
+            val tmpDir = Files.createTempDirectory("git_").toFile()
+            val git = Git.cloneRepository()
+                .setURI(repositoryUrl)
+                .setCredentialsProvider(UsernamePasswordCredentialsProvider(token, ""))
+                .setDirectory(tmpDir)
+                .call()
+
+            val subPath = "plugins"
+            // Copy files from the directory to the repository
+            directoryPath.toFile().walk().forEach { file ->
+                if (file.isFile) {
+                    val relativePath = directoryPath.relativize(file.toPath()).toString()
+                    val destFile = File("${tmpDir.absolutePath}/${subPath}/", relativePath)
+                    destFile.parentFile.mkdirs()
+                    Files.copy(file.toPath(), destFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+
+            // Add all files to the repository
+            git.add().addFilepattern(".").call()
+
+            // Get the list of changed files
+            val status = git.status().call()
+            val addedFiles = status.added
+            val changedFiles = status.changed
+
+            val files : MutableList<String> = emptyList<String>().toMutableList()
+
+            files.addAll(addedFiles)
+            files.addAll(changedFiles)
+
+            var commitDescription = "===============\n"
+
+            files.filter { it.endsWith(".jar") }.forEach { entry ->
+                println(entry.replace("${subPath}/jar/","").substringBefore("_") + "\n")
+                commitDescription += entry.replace("${subPath}/jar/","").substringBefore("_") + "\n"
+            }
+
+            val currentDateTime = LocalDateTime.now()
+            val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+            val formattedDateTime = currentDateTime.format(formatter)
+
+            val commitMessage = "Updated RL Plugins ($formattedDateTime)"
+
+            git.commit().setMessage("$commitMessage\n\n$commitDescription").call()
+
+            git.push().setCredentialsProvider(UsernamePasswordCredentialsProvider(token, "")).call()
+
+        } catch (e: GitAPIException) {
+            println("Error committing files: ${e.message}")
+        }
+    }
+
 }
