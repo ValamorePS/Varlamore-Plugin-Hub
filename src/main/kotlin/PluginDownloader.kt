@@ -1,3 +1,5 @@
+import PluginHubManifest.DisplayData
+import PluginHubManifest.JarData
 import PluginHubManifest.ManifestFull
 import PluginHubManifest.ManifestLite
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -9,7 +11,9 @@ import com.google.gson.Gson
 import com.mashape.unirest.http.HttpResponse
 import com.mashape.unirest.http.JsonNode
 import com.mashape.unirest.http.Unirest
-import jakarta.annotation.Nullable
+import me.tongfei.progressbar.ProgressBar
+import me.tongfei.progressbar.ProgressBarBuilder
+import me.tongfei.progressbar.ProgressBarStyle
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.errors.GitAPIException
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
@@ -33,6 +37,7 @@ import java.time.format.DateTimeFormatter
 import java.util.*
 import kotlin.io.path.createDirectory
 import kotlin.io.path.fileSize
+import kotlin.system.measureTimeMillis
 
 object PluginDownloader {
 
@@ -76,79 +81,110 @@ object PluginDownloader {
             .map(Path::toFile)
             .forEach(File::delete)
 
-        val latestVersion = getLatestRuneLiteVersion()
-        val latestManifestLite = getLatestManifestLite(latestVersion)
-        val latestManifestFull = getLatestManifestFul(latestVersion)
-
-        val availablePluginsManifest: JSONArray = latestManifestFull.`object`.optJSONArray("display")
-        val availablePlugins: JSONArray = latestManifestLite.`object`.optJSONArray("jars")
-
-        val liteManifest = availablePlugins.filterIsInstance<JSONObject>().filter { p -> wantedPlugins.contains(p.getString("internalName")) }
-        val filteredMapManifest = availablePluginsManifest.filterIsInstance<JSONObject>()
-            .filter { p -> wantedPlugins.contains(p.getString("internalName")) }
-            .associateBy({ it.getString("internalName") }, { it })
-
-        liteManifest.forEach { p ->
-            val internalName = p.getString("internalName")
-            val fullManifest = filteredMapManifest[internalName]?: return
-            val hash = p.getString("jarHash")
-            val icon = fullManifest.getString("iconHash")
-            download("jar", internalName, "${internalName}_${hash}.jar")
-            download("icon", internalName,  "${internalName}_${icon}.png")
-        }
+        val pluginToManifest: MutableMap<String, MutableList<Pair<String, String>>> = mutableMapOf()
+        val manifestData: MutableMap<String, ManifestFull> = mutableMapOf()
 
         val manifestFull = ManifestFull()
         val manifestLite = ManifestLite()
 
-        liteManifest.forEach {
-            val data = PluginHubManifest.JarData();
-            data.internalName = it.getString("internalName")
-            data.displayName = it.getString("displayName")
-            data.jarHash = it.getString("jarHash")
-            val path = Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY, "jar", "${data.internalName}_${data.jarHash}.jar")
-            data.jarSize = path.fileSize().toInt()
-
-            manifestLite.jars.add(data)
+        File("./plugin-hub/cacheManifests/").listFiles()?.forEach {
+            val build = it.nameWithoutExtension
+            val data = Gson().fromJson(it.readText(),ManifestFull().javaClass)
+            manifestData[build] = data
+            data.display.forEach { display ->
+                val pairList = pluginToManifest.getOrPut(display.internalName) { mutableListOf() }
+                pairList.add(display.version to build)
+            }
         }
 
+        loadManifestData(pluginToManifest, manifestData)
 
-        filteredMapManifest.forEach {
-            val data = PluginHubManifest.DisplayData();
-            val internalName = it.key
-            data.internalName = internalName
-            data.tags = (it.value.get("tags") as? JSONArray)?.map { it.toString() }?.toTypedArray()
-            data.iconHash = it.value.getString("iconHash")
-            data.displayName = it.value.getString("displayName")
-            data.version = it.value.getString("displayName")
-            data.createdAt = it.value.getLong("createdAt")
-            data.lastUpdatedAt = it.value.getLong("lastUpdatedAt")
-            data.author = it.value.getString("author")
-            data.description = it.value.getString("description")
+        val latestVersion = getLatestRuneLiteVersion()
+        val progressBar = ProgressBarBuilder()
+            .setInitialMax(wantedPlugins.size.toLong())
+            .setStyle(ProgressBarStyle.ASCII)
+            .setTaskName("Processing Plugins")
+            .showSpeed()
+            .build()
 
-            if(it.value.has("warning")) {
-                data.warning = it.value.getString("warning")
+        progressBar.maxHint(wantedPlugins.size.toLong())
+
+        wantedPlugins.forEach { plugin ->
+            val (name, ver) = parsePluginNameAndVersion(plugin)
+
+            progressBar.extraMessage = " ${name}: ${ver ?: "Latest"}"
+
+            if (!pluginToManifest.contains(name)) {
+                println("Unable to find plugin: $name")
+                progressBar.step()
+                return@forEach
             }
-            if(it.value.has("buildFailAt")) {
-                data.buildFailAt = it.value.getLong("buildFailAt")
-            }
-            if(it.value.has("unavailableReason")) {
-                data.unavailableReason = it.value.getString("unavailableReason")
-            }
 
+            try {
+                val (manifestID, manifestDisplayData, manifestJars) = if (ver != null) {
+                    pluginToManifest[name]!!.find { it.first == ver }?.let { pair ->
+                        val manifestID = pair.second
+                        Triple(manifestID, manifestData[manifestID]!!.display.find { it.internalName == name }!!,
+                            manifestData[manifestID]!!.jars.find { it.internalName == name }!!)
+                    } ?: run {
+                        println("Version $ver not found for plugin $name")
+                        return@forEach
+                    }
+                } else {
+                    val manifest = GSON.fromJson(getLatestManifestFull(latestVersion), ManifestFull().javaClass)
+                    Triple("", manifest.display.find { it.internalName == name }!!, manifest.jars.find { it.internalName == name }!!)
+                }
 
-            manifestFull.display.add(data)
-            manifestFull.jars.add(manifestLite.jars.first { it.internalName == internalName })
+                downloadAndProcessManifest(manifestDisplayData, manifestJars, manifestFull, manifestLite)
+                progressBar.step()
+            } catch (e: Exception) {
+                println("Error processing plugin: $plugin - ${e.message}")
+                e.printStackTrace()
+            }
         }
-
-
+        progressBar.close()
 
         Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY, "manifest").createDirectory()
         writeLiteManifest(manifestLite)
         writeFullManifest(manifestFull)
-
         commitFiles("https://github.com/ValamorePS/hosting.git",args.first(),Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY))
+    }
 
+    fun loadManifestData(pluginToManifest: MutableMap<String, MutableList<Pair<String, String>>>, manifestData: MutableMap<String, ManifestFull>) {
+        File("./plugin-hub/cacheManifests/").listFiles()?.forEach { file ->
+            val build = file.nameWithoutExtension
+            val data = Gson().fromJson(file.readText(), ManifestFull().javaClass)
+            manifestData[build] = data
+            data.display.forEach { display ->
+                val pairList = pluginToManifest.getOrPut(display.internalName) { mutableListOf() }
+                pairList.add(display.version to build)
+            }
+        }
+    }
 
+    fun parsePluginNameAndVersion(plugin: String): Pair<String, String?> {
+        return if (plugin.contains(":")) {
+            val (name, ver) = plugin.split(":")
+            name to if (ver.isNotBlank()) ver else null
+        } else {
+            plugin to null
+        }
+    }
+
+    private fun downloadAndProcessManifest(
+        manifestDisplayData: DisplayData,
+        manifestJars: JarData,
+        manifestFull: ManifestFull,
+        manifestLite: ManifestLite
+    ) {
+        val path = Paths.get(PluginHubConstants.PLUGIN_HUB_BASE_PATH, PluginHubConstants.PLUGIN_HUB_OUTPUT_DIRECTORY, "jar", "${manifestDisplayData.internalName}_${manifestJars.jarHash}.jar")
+
+        download("jar", manifestDisplayData.internalName, "${manifestDisplayData.internalName}_${manifestJars.jarHash}.jar")
+        download("icon", manifestDisplayData.internalName, "${manifestDisplayData.internalName}_${manifestDisplayData.iconHash}.png")
+        manifestJars.jarSize = path.fileSize().toInt()
+        manifestFull.display.add(manifestDisplayData)
+        manifestFull.jars.add(manifestJars)
+        manifestLite.jars.add(manifestJars)
     }
 
     private fun writeLiteManifest(manifest: ManifestLite) {
@@ -228,6 +264,30 @@ object PluginDownloader {
         }
 
         return JsonNode(String(buffer))
+    }
+
+    private fun getLatestManifestFull(version: String): String {
+        val response: HttpResponse<InputStream> =
+            Unirest.get("https://repo.runelite.net/plugins/manifest/${version}_full.js").asBinary()
+        val stream = DataInputStream(response.body)
+
+        val signatureSize = stream.readInt()
+        val signatureBuffer = ByteArray(signatureSize)
+        stream.read(signatureBuffer, 0, signatureSize)
+
+        val remaining = stream.available()
+        val buffer = ByteArray(remaining)
+        stream.read(buffer, 0, remaining)
+
+        val s = Signature.getInstance("SHA256withRSA")
+        s.initVerify(loadRuneLiteCertificate())
+        s.update(buffer)
+
+        if (!s.verify(signatureBuffer)) {
+            throw RuntimeException("Unable to verify external plugin manifest")
+        }
+
+        return String(buffer)
     }
 
     private fun getLatestManifestFul(version: String): JsonNode {
@@ -349,3 +409,4 @@ object PluginDownloader {
     }
 
 }
+

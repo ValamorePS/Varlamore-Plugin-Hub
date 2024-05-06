@@ -30,7 +30,7 @@ public class PluginHubManifest
     @EqualsAndHashCode(callSuper = true)
     public static class ManifestFull extends ManifestLite
     {
-        public List<DisplayData> display = new ArrayList<>();
+        public ArrayList<DisplayData> display = new ArrayList<>();
     }
 
     @Data
